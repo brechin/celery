@@ -10,6 +10,8 @@ from __future__ import absolute_import
 
 from time import time
 
+from billiard.exceptions import SoftTimeLimitExceeded
+
 try:
     from gevent import Timeout
 except ImportError:  # pragma: no cover
@@ -23,16 +25,17 @@ __all__ = ['TaskPool']
 
 
 def apply_timeout(target, args=(), kwargs={}, callback=None,
-                  accept_callback=None, pid=None, timeout=None,
+                  accept_callback=None, pid=None, timeout=None, soft_timeout=None,
                   timeout_callback=None, Timeout=Timeout,
                   apply_target=apply_target, **rest):
     try:
-        with Timeout(timeout):
-            return apply_target(target, args, kwargs, callback,
-                                accept_callback, pid,
-                                propagate=(Timeout, ), **rest)
-    except Timeout:
-        return timeout_callback(False, timeout)
+        with Timeout(soft_timeout, SoftTimeLimitExceeded) as soft:
+            with Timeout(timeout):
+                return apply_target(target, args, kwargs, callback,
+                                    accept_callback, pid,
+                                    propagate=(Timeout, ), **rest)
+    except Timeout as t:
+        return timeout_callback(t is soft, t.seconds)
 
 
 class Schedule(timer2.Schedule):
@@ -104,6 +107,7 @@ class TaskPool(BasePool):
         self.Pool = Pool
         self.spawn_n = spawn_raw
         self.timeout = kwargs.get('timeout')
+        self.soft_timeout = kwargs.get('soft_timeout')
         super(TaskPool, self).__init__(*args, **kwargs)
 
     def on_start(self):
@@ -115,12 +119,14 @@ class TaskPool(BasePool):
             self._pool.join()
 
     def on_apply(self, target, args=None, kwargs=None, callback=None,
-                 accept_callback=None, timeout=None,
+                 accept_callback=None, timeout=None, soft_timeout=None,
                  timeout_callback=None, **_):
+        has_timeout = timeout or soft_timeout
         timeout = self.timeout if timeout is None else timeout
-        return self._quick_put(apply_timeout if timeout else apply_target,
+        soft_timeout = self.soft_timeout if soft_timeout is None else soft_timeout
+        return self._quick_put(apply_timeout if has_timeout else apply_target,
                                target, args, kwargs, callback, accept_callback,
-                               timeout=timeout,
+                               timeout=timeout, soft_timeout=soft_timeout,
                                timeout_callback=timeout_callback)
 
     def grow(self, n=1):
